@@ -3,7 +3,7 @@
     <div class="footer-content">
       <p class="copyright">
         <a
-          href="https://www.google.com"
+          href="https://github.com/lyu62873/ai-code-generator-frontend"
           target="_blank"
           rel="noopener noreferrer"
           class="author-link"

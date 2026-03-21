@@ -90,7 +90,15 @@ const originItems = [
   },
   {
     key: 'others',
-    label: h('a', { href: 'https://www.google.com', target: '_blank' }, 'Github Link'),
+    label: h(
+      'a',
+      {
+        href: 'https://github.com/lyu62873/ai-code-generator-frontend',
+        target: '_blank',
+        rel: 'noopener noreferrer',
+      },
+      'Github Link',
+    ),
     title: 'Github Link',
   },
 ]

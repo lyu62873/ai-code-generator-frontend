@@ -1,0 +1,80 @@
+# Self-hosted deploy: build on GitHub Actions, upload dist via SCP, move into Nginx web root over SSH.
+#
+# Required repository secrets:
+#   REMOTE_HOST     — server hostname or IP
+#   SERVER_SSH_KEY  — private key (PEM), full contents including BEGIN/END lines
+#
+# Optional secrets (production build):
+#   VITE_API_BASE_URL, VITE_DEPLOY_DOMAIN
+#
+# Optional secrets:
+#   REMOTE_USER     — SSH user (default: root)
+#
+# Edit env block below if your paths differ (1Panel / Nginx).
+
+name: Frontend Deploy (Vue 3)
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Staging dir on the server (SCP target); then copied into Nginx site root.
+  REMOTE_STAGING_DIR: /project/ai-code-generator-frontend
+  # Nginx / 1Panel static root (adjust to your site).
+  REMOTE_WEB_DIR: /opt/1panel/www/sites/ai-code-generator/index
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        env:
+          VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
+          VITE_DEPLOY_DOMAIN: ${{ secrets.VITE_DEPLOY_DOMAIN }}
+        # Own domain at site root → default base "/". Do not use GitHub Pages --base here.
+        run: npm run build
+
+      - name: Upload dist to server (staging)
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.REMOTE_HOST }}
+          username: ${{ secrets.REMOTE_USER || 'root' }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          source: dist/*
+          target: ${{ env.REMOTE_STAGING_DIR }}
+          strip_components: 1
+
+      - name: Deploy to Nginx directory
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.REMOTE_HOST }}
+          username: ${{ secrets.REMOTE_USER || 'root' }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            set -e
+            WEB_DIR="${{ env.REMOTE_WEB_DIR }}"
+            STAGING="${{ env.REMOTE_STAGING_DIR }}"
+            mkdir -p "$WEB_DIR"
+            rm -rf "$WEB_DIR"/*
+            cp -r "$STAGING"/* "$WEB_DIR"/
+            echo "Frontend deployed successfully."

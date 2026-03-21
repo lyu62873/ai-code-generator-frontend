@@ -144,7 +144,7 @@ onMounted(() => {
     <div class="container">
       <div class="hero-section">
         <h1 class="hero-title">AI App Generation Platform</h1>
-        <p class="hero-description">One Sentence, One Web</p>
+        <p class="hero-description">One Sentence → One Web</p>
       </div>
 
       <div class="input-section">

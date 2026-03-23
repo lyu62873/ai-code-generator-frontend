@@ -545,10 +545,6 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
     eventSource.addEventListener('done', function () {
       if (streamCompleted) return
 
-      // #region agent log
-      fetch('http://127.0.0.1:7709/ingest/e56e9026-031c-44f8-a5b6-847fc5c97604',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6a9b34'},body:JSON.stringify({sessionId:'6a9b34',runId:'pre-fix',hypothesisId:'H1',location:'AppChatPage.vue:done-listener',message:'frontend_received_done_event',data:{appId:appId.value,aiMessageIndex},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
-
       streamCompleted = true
       isGenerating.value = false
       eventSource?.close()
@@ -582,13 +578,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
 
     eventSource.onerror = function () {
       if (streamCompleted || !isGenerating.value) return
-      // #region agent log
-      fetch('http://127.0.0.1:7709/ingest/e56e9026-031c-44f8-a5b6-847fc5c97604',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6a9b34'},body:JSON.stringify({sessionId:'6a9b34',runId:'pre-fix',hypothesisId:'H1',location:'AppChatPage.vue:onerror',message:'frontend_sse_onerror_triggered',data:{appId:appId.value,readyState:eventSource?.readyState,isGenerating:isGenerating.value},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       if (eventSource?.readyState === EventSource.CONNECTING) {
-        // #region agent log
-        fetch('http://127.0.0.1:7709/ingest/e56e9026-031c-44f8-a5b6-847fc5c97604',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6a9b34'},body:JSON.stringify({sessionId:'6a9b34',runId:'pre-fix',hypothesisId:'H1',location:'AppChatPage.vue:onerror-connecting-branch',message:'frontend_treat_connecting_as_complete',data:{appId:appId.value,aiMessageIndex},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
         streamCompleted = true
         isGenerating.value = false
         eventSource?.close()

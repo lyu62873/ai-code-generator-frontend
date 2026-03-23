@@ -165,6 +165,8 @@ onMounted(() => {
       </div>
 
       <div class="quick-actions">
+        <!-- TODO: Reimplement after bug fixed. -->
+        <!--
         <a-button
           type="default"
           @click="
@@ -201,6 +203,7 @@ onMounted(() => {
           "
           >Portfolio</a-button
         >
+        -->
       </div>
 
       <div class="section">

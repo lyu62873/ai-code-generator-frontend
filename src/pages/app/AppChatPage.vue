@@ -306,6 +306,14 @@ const isAdmin = computed(() => {
 const canEditAppName = computed(() => isOwner.value || isAdmin.value)
 
 const appDetailVisible = ref(false)
+let activeEventSource: EventSource | null = null
+
+const closeActiveEventSource = () => {
+  if (activeEventSource) {
+    activeEventSource.close()
+    activeEventSource = null
+  }
+}
 
 const showAppDetail = () => {
   appDetailVisible.value = true
@@ -508,6 +516,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
   let streamCompleted = false
 
   try {
+    closeActiveEventSource()
     const baseURL = request.defaults.baseURL || API_BASE_URL
 
     const params = new URLSearchParams({
@@ -520,6 +529,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
     eventSource = new EventSource(url, {
       withCredentials: true,
     })
+    activeEventSource = eventSource
 
     let fullContent = ''
 
@@ -547,7 +557,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
 
       streamCompleted = true
       isGenerating.value = false
-      eventSource?.close()
+      closeActiveEventSource()
 
       setTimeout(async () => {
         await fetchAppInfo()
@@ -569,7 +579,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
 
         streamCompleted = true
         isGenerating.value = false
-        eventSource?.close()
+        closeActiveEventSource()
       } catch (parseError) {
         console.error('Parse error event failed:', parseError, 'raw:', event.data)
         handleError(new Error('Server error'), aiMessageIndex)
@@ -578,18 +588,25 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
 
     eventSource.onerror = function () {
       if (streamCompleted || !isGenerating.value) return
-      if (eventSource?.readyState === EventSource.CONNECTING) {
+      const currentReadyState = eventSource?.readyState
+      // CONNECTING means browser is auto-retrying SSE.
+      // Do not close the stream here, otherwise temporary jitter becomes a hard failure.
+      if (currentReadyState === EventSource.CONNECTING) {
+        return
+      }
+      if (currentReadyState === EventSource.CLOSED) {
         streamCompleted = true
         isGenerating.value = false
-        eventSource?.close()
-
-        setTimeout(async () => {
-          await fetchAppInfo()
-          updatePreview()
-        }, 1000)
-      } else {
-        handleError(new Error('SSE connection error'), aiMessageIndex)
+        closeActiveEventSource()
+        messages.value[aiMessageIndex].loading = false
+        if (!messages.value[aiMessageIndex].content) {
+          messages.value[aiMessageIndex].content =
+            'Connection interrupted before any content was received. Please retry.'
+        }
+        message.warning('Connection interrupted. Partial content has been kept.')
+        return
       }
+      handleError(new Error('SSE connection error'), aiMessageIndex)
     }
   } catch (error) {
     console.error('Create EventSource failed:', error)
@@ -599,10 +616,13 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
 
 const handleError = (error: unknown, aiMessageIndex: number) => {
   console.error('Generate code failed:', error)
-  messages.value[aiMessageIndex].content = 'Sorry, an error occurred. Please retry.'
+  if (!messages.value[aiMessageIndex].content) {
+    messages.value[aiMessageIndex].content = 'Sorry, an error occurred. Please retry.'
+  }
   messages.value[aiMessageIndex].loading = false
   message.error('Generation failed, please retry')
   isGenerating.value = false
+  closeActiveEventSource()
 }
 
 const updatePreview = () => {
@@ -760,7 +780,9 @@ onMounted(() => {
   })
 })
 
-onUnmounted(() => {})
+onUnmounted(() => {
+  closeActiveEventSource()
+})
 </script>
 
 <style scoped>

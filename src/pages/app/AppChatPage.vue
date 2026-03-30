@@ -308,15 +308,75 @@ const canEditAppName = computed(() => isOwner.value || isAdmin.value)
 const appDetailVisible = ref(false)
 let activeEventSource: EventSource | null = null
 const currentSessionId = ref<string>()
-const lastChunkSeq = ref(0)
+const lastChunkSeq = ref(-1)
 const reconnectAttempts = ref(0)
-const MAX_RECONNECT_ATTEMPTS = 3
+const MAX_RECONNECT_ATTEMPTS = 10
+let recoveryPollingTimer: ReturnType<typeof setInterval> | null = null
+let recoveryPollingAttempts = 0
+const MAX_RECOVERY_POLLING_ATTEMPTS = 20
+const activeUserMessage = ref('')
+
+interface StreamRecoveryState {
+  sessionId: string
+  appId: string
+  message: string
+  lastSeq: number
+  aiContent: string
+}
 
 const closeActiveEventSource = () => {
   if (activeEventSource) {
     activeEventSource.close()
     activeEventSource = null
   }
+}
+
+const stopRecoveryPolling = () => {
+  if (recoveryPollingTimer) {
+    clearInterval(recoveryPollingTimer)
+    recoveryPollingTimer = null
+  }
+  recoveryPollingAttempts = 0
+}
+
+const getRecoveryStorageKey = () => {
+  return appId.value ? `codegen-stream-session:${appId.value}` : ''
+}
+
+const saveRecoveryState = (aiContent: string) => {
+  const key = getRecoveryStorageKey()
+  if (!key || !currentSessionId.value || !activeUserMessage.value) {
+    return
+  }
+  const state: StreamRecoveryState = {
+    sessionId: currentSessionId.value,
+    appId: String(appId.value),
+    message: activeUserMessage.value,
+    lastSeq: lastChunkSeq.value,
+    aiContent,
+  }
+  sessionStorage.setItem(key, JSON.stringify(state))
+}
+
+const clearRecoveryState = () => {
+  const key = getRecoveryStorageKey()
+  if (key) {
+    sessionStorage.removeItem(key)
+  }
+}
+
+const startRecoveryPolling = () => {
+  if (recoveryPollingTimer) {
+    return
+  }
+  recoveryPollingAttempts = 0
+  recoveryPollingTimer = setInterval(async () => {
+    recoveryPollingAttempts += 1
+    await loadChatHistory(false, true)
+    if (recoveryPollingAttempts >= MAX_RECOVERY_POLLING_ATTEMPTS) {
+      stopRecoveryPolling()
+    }
+  }, 3000)
 }
 
 const showAppDetail = () => {
@@ -367,7 +427,42 @@ const saveAppName = async () => {
   }
 }
 
-const loadChatHistory = async (isLoadMore = false) => {
+const recoverLatestAiMessage = (historyMessages: Message[]) => {
+  if (!historyMessages.length || !messages.value.length) {
+    return
+  }
+  let latestHistoryAi: Message | undefined
+  for (let i = historyMessages.length - 1; i >= 0; i--) {
+    if (historyMessages[i].type === 'ai') {
+      latestHistoryAi = historyMessages[i]
+      break
+    }
+  }
+  if (!latestHistoryAi) {
+    return
+  }
+
+  let lastAiIndex = -1
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    if (messages.value[i].type === 'ai') {
+      lastAiIndex = i
+      break
+    }
+  }
+  if (lastAiIndex < 0) {
+    messages.value.push({
+      type: 'ai',
+      content: latestHistoryAi.content,
+    })
+    return
+  }
+  const currentAi = messages.value[lastAiIndex]
+  if ((latestHistoryAi.content?.length || 0) > (currentAi.content?.length || 0)) {
+    currentAi.content = latestHistoryAi.content
+  }
+}
+
+const loadChatHistory = async (isLoadMore = false, recoveryMode = false) => {
   if (!appId.value || loadingHistory.value) return
   loadingHistory.value = true
   try {
@@ -389,7 +484,9 @@ const loadChatHistory = async (isLoadMore = false) => {
               createTime: chat.createTime,
             }))
             .reverse()
-        if (isLoadMore) {
+        if (recoveryMode) {
+          recoverLatestAiMessage(historyMessages)
+        } else if (isLoadMore) {
           messages.value.unshift(...historyMessages)
         } else {
           messages.value = historyMessages
@@ -452,9 +549,12 @@ const fetchAppInfo = async () => {
 }
 
 const sendInitialMessage = async (prompt: string) => {
+  stopRecoveryPolling()
+  clearRecoveryState()
   currentSessionId.value = undefined
-  lastChunkSeq.value = 0
+  lastChunkSeq.value = -1
   reconnectAttempts.value = 0
+  activeUserMessage.value = prompt
   messages.value.push({
     type: 'user',
     content: prompt,
@@ -479,8 +579,10 @@ const sendMessage = async () => {
     return
   }
 
+  stopRecoveryPolling()
+  clearRecoveryState()
   currentSessionId.value = undefined
-  lastChunkSeq.value = 0
+  lastChunkSeq.value = -1
   reconnectAttempts.value = 0
 
   let message = userInput.value.trim()
@@ -496,6 +598,7 @@ const sendMessage = async () => {
     message += elementContext
   }
   userInput.value = ''
+  activeUserMessage.value = message
   messages.value.push({
     type: 'user',
     content: message,
@@ -526,7 +629,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
   let streamCompleted = false
 
   try {
-    let fullContent = ''
+    let fullContent = messages.value[aiMessageIndex].content || ''
     const connect = () => {
       if (streamCompleted) return
       closeActiveEventSource()
@@ -537,6 +640,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
       })
       if (currentSessionId.value) {
         params.set('sessionId', currentSessionId.value)
+        params.set('resumeOnly', 'true')
       }
       params.set('lastSeq', String(lastChunkSeq.value))
 
@@ -549,7 +653,12 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
       eventSource.addEventListener('session', function (event: MessageEvent) {
         if (event.data) {
           currentSessionId.value = event.data
+          saveRecoveryState(fullContent)
         }
+      })
+
+      eventSource.addEventListener('ping', function () {
+        reconnectAttempts.value = 0
       })
 
       eventSource.onmessage = function (event) {
@@ -558,13 +667,23 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
         try {
           const parsed = JSON.parse(event.data)
           const content = parsed.d
+          const seq = Number(parsed.seq)
 
           if (content !== undefined && content !== null) {
+            if (Number.isFinite(seq)) {
+              if (seq <= lastChunkSeq.value) {
+                return
+              }
+              lastChunkSeq.value = seq
+            } else {
+              lastChunkSeq.value += 1
+            }
             fullContent += content
-            lastChunkSeq.value += 1
             reconnectAttempts.value = 0
+            stopRecoveryPolling()
             messages.value[aiMessageIndex].content = fullContent
             messages.value[aiMessageIndex].loading = false
+            saveRecoveryState(fullContent)
             scrollToBottom()
           }
         } catch (error) {
@@ -579,9 +698,12 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
         streamCompleted = true
         isGenerating.value = false
         closeActiveEventSource()
+        stopRecoveryPolling()
         currentSessionId.value = undefined
-        lastChunkSeq.value = 0
+        lastChunkSeq.value = -1
         reconnectAttempts.value = 0
+        activeUserMessage.value = ''
+        clearRecoveryState()
 
         setTimeout(async () => {
           await fetchAppInfo()
@@ -604,6 +726,12 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
           streamCompleted = true
           isGenerating.value = false
           closeActiveEventSource()
+          stopRecoveryPolling()
+          currentSessionId.value = undefined
+          lastChunkSeq.value = -1
+          reconnectAttempts.value = 0
+          activeUserMessage.value = ''
+          clearRecoveryState()
         } catch (parseError) {
           console.error('Parse error event failed:', parseError, 'raw:', event.data)
           handleError(new Error('Server error'), aiMessageIndex)
@@ -615,7 +743,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
         closeActiveEventSource()
         reconnectAttempts.value += 1
         if (reconnectAttempts.value <= MAX_RECONNECT_ATTEMPTS) {
-          const retryDelay = reconnectAttempts.value * 1000
+          const retryDelay = Math.min(reconnectAttempts.value * 1500, 10000)
           setTimeout(() => {
             connect()
           }, retryDelay)
@@ -629,7 +757,9 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
           messages.value[aiMessageIndex].content =
             'Connection interrupted before any content was received. Please retry.'
         }
-        message.warning('Connection interrupted. Partial content has been kept.')
+        saveRecoveryState(messages.value[aiMessageIndex].content || '')
+        startRecoveryPolling()
+        message.warning('Connection interrupted. Attempting to recover progress in background...')
       }
     }
 
@@ -646,9 +776,50 @@ const handleError = (error: unknown, aiMessageIndex: number) => {
     messages.value[aiMessageIndex].content = 'Sorry, an error occurred. Please retry.'
   }
   messages.value[aiMessageIndex].loading = false
+  saveRecoveryState(messages.value[aiMessageIndex].content || '')
+  startRecoveryPolling()
   message.error('Generation failed, please retry')
   isGenerating.value = false
   closeActiveEventSource()
+}
+
+const tryResumeStreamFromRecoveryState = async () => {
+  const key = getRecoveryStorageKey()
+  if (!key) {
+    return
+  }
+  const raw = sessionStorage.getItem(key)
+  if (!raw) {
+    return
+  }
+  try {
+    const state = JSON.parse(raw) as StreamRecoveryState
+    if (
+      !state ||
+      !state.sessionId ||
+      !state.message ||
+      String(state.appId) !== String(appId.value)
+    ) {
+      clearRecoveryState()
+      return
+    }
+    currentSessionId.value = state.sessionId
+    lastChunkSeq.value = Number.isFinite(state.lastSeq) ? state.lastSeq : -1
+    reconnectAttempts.value = 0
+    activeUserMessage.value = state.message
+
+    const aiMessageIndex = messages.value.length
+    messages.value.push({
+      type: 'ai',
+      content: state.aiContent || '',
+      loading: true,
+    })
+    isGenerating.value = true
+    await generateCode(state.message, aiMessageIndex)
+  } catch (error) {
+    console.error('Recover stream state failed:', error)
+    clearRecoveryState()
+  }
 }
 
 const updatePreview = () => {
@@ -799,7 +970,9 @@ const getInputPlaceholder = () => {
 }
 
 onMounted(() => {
-  fetchAppInfo()
+  fetchAppInfo().then(() => {
+    tryResumeStreamFromRecoveryState()
+  })
 
   window.addEventListener('message', (event) => {
     visualEditor.handleIframeMessage(event)
@@ -807,6 +980,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  stopRecoveryPolling()
   closeActiveEventSource()
 })
 </script>

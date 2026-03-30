@@ -307,6 +307,10 @@ const canEditAppName = computed(() => isOwner.value || isAdmin.value)
 
 const appDetailVisible = ref(false)
 let activeEventSource: EventSource | null = null
+const currentSessionId = ref<string>()
+const lastChunkSeq = ref(0)
+const reconnectAttempts = ref(0)
+const MAX_RECONNECT_ATTEMPTS = 3
 
 const closeActiveEventSource = () => {
   if (activeEventSource) {
@@ -448,6 +452,9 @@ const fetchAppInfo = async () => {
 }
 
 const sendInitialMessage = async (prompt: string) => {
+  currentSessionId.value = undefined
+  lastChunkSeq.value = 0
+  reconnectAttempts.value = 0
   messages.value.push({
     type: 'user',
     content: prompt,
@@ -471,6 +478,10 @@ const sendMessage = async () => {
   if (!userInput.value.trim() || isGenerating.value) {
     return
   }
+
+  currentSessionId.value = undefined
+  lastChunkSeq.value = 0
+  reconnectAttempts.value = 0
 
   let message = userInput.value.trim()
   if (selectedElementInfo.value) {
@@ -512,102 +523,117 @@ const sendMessage = async () => {
 }
 
 const generateCode = async (userMessage: string, aiMessageIndex: number) => {
-  let eventSource: EventSource | null = null
   let streamCompleted = false
 
   try {
-    closeActiveEventSource()
-    const baseURL = request.defaults.baseURL || API_BASE_URL
-
-    const params = new URLSearchParams({
-      appId: appId.value || '',
-      message: userMessage,
-    })
-
-    const url = `${baseURL}/app/chat/gen/code?${params}`
-
-    eventSource = new EventSource(url, {
-      withCredentials: true,
-    })
-    activeEventSource = eventSource
-
     let fullContent = ''
-
-    eventSource.onmessage = function (event) {
+    const connect = () => {
       if (streamCompleted) return
-
-      try {
-        const parsed = JSON.parse(event.data)
-        const content = parsed.d
-
-        if (content !== undefined && content !== null) {
-          fullContent += content
-          messages.value[aiMessageIndex].content = fullContent
-          messages.value[aiMessageIndex].loading = false
-          scrollToBottom()
-        }
-      } catch (error) {
-        console.error('Parse message failed:', error)
-        handleError(error, aiMessageIndex)
-      }
-    }
-
-    eventSource.addEventListener('done', function () {
-      if (streamCompleted) return
-
-      streamCompleted = true
-      isGenerating.value = false
       closeActiveEventSource()
+      const baseURL = request.defaults.baseURL || API_BASE_URL
+      const params = new URLSearchParams({
+        appId: appId.value || '',
+        message: userMessage,
+      })
+      if (currentSessionId.value) {
+        params.set('sessionId', currentSessionId.value)
+      }
+      params.set('lastSeq', String(lastChunkSeq.value))
 
-      setTimeout(async () => {
-        await fetchAppInfo()
-        updatePreview()
-      }, 1000)
-    })
+      const url = `${baseURL}/app/chat/gen/code?${params}`
+      const eventSource = new EventSource(url, {
+        withCredentials: true,
+      })
+      activeEventSource = eventSource
 
-    eventSource.addEventListener('business-error', function (event: MessageEvent) {
-      if (streamCompleted) return
+      eventSource.addEventListener('session', function (event: MessageEvent) {
+        if (event.data) {
+          currentSessionId.value = event.data
+        }
+      })
 
-      try {
-        const errorData = JSON.parse(event.data)
-        console.error('SSE business error:', errorData)
+      eventSource.onmessage = function (event) {
+        if (streamCompleted) return
 
-        const errorMessage = errorData.message || 'Error during generation'
-        messages.value[aiMessageIndex].content = `❌ ${errorMessage}`
-        messages.value[aiMessageIndex].loading = false
-        message.error(errorMessage)
+        try {
+          const parsed = JSON.parse(event.data)
+          const content = parsed.d
+
+          if (content !== undefined && content !== null) {
+            fullContent += content
+            lastChunkSeq.value += 1
+            reconnectAttempts.value = 0
+            messages.value[aiMessageIndex].content = fullContent
+            messages.value[aiMessageIndex].loading = false
+            scrollToBottom()
+          }
+        } catch (error) {
+          console.error('Parse message failed:', error)
+          handleError(error, aiMessageIndex)
+        }
+      }
+
+      eventSource.addEventListener('done', function () {
+        if (streamCompleted) return
 
         streamCompleted = true
         isGenerating.value = false
         closeActiveEventSource()
-      } catch (parseError) {
-        console.error('Parse error event failed:', parseError, 'raw:', event.data)
-        handleError(new Error('Server error'), aiMessageIndex)
-      }
-    })
+        currentSessionId.value = undefined
+        lastChunkSeq.value = 0
+        reconnectAttempts.value = 0
 
-    eventSource.onerror = function () {
-      if (streamCompleted || !isGenerating.value) return
-      const currentReadyState = eventSource?.readyState
-      // CONNECTING means browser is auto-retrying SSE.
-      // Do not close the stream here, otherwise temporary jitter becomes a hard failure.
-      if (currentReadyState === EventSource.CONNECTING) {
-        return
-      }
-      if (currentReadyState === EventSource.CLOSED) {
+        setTimeout(async () => {
+          await fetchAppInfo()
+          updatePreview()
+        }, 1000)
+      })
+
+      eventSource.addEventListener('business-error', function (event: MessageEvent) {
+        if (streamCompleted) return
+
+        try {
+          const errorData = JSON.parse(event.data)
+          console.error('SSE business error:', errorData)
+
+          const errorMessage = errorData.message || 'Error during generation'
+          messages.value[aiMessageIndex].content = `❌ ${errorMessage}`
+          messages.value[aiMessageIndex].loading = false
+          message.error(errorMessage)
+
+          streamCompleted = true
+          isGenerating.value = false
+          closeActiveEventSource()
+        } catch (parseError) {
+          console.error('Parse error event failed:', parseError, 'raw:', event.data)
+          handleError(new Error('Server error'), aiMessageIndex)
+        }
+      })
+
+      eventSource.onerror = function () {
+        if (streamCompleted || !isGenerating.value) return
+        closeActiveEventSource()
+        reconnectAttempts.value += 1
+        if (reconnectAttempts.value <= MAX_RECONNECT_ATTEMPTS) {
+          const retryDelay = reconnectAttempts.value * 1000
+          setTimeout(() => {
+            connect()
+          }, retryDelay)
+          return
+        }
+
         streamCompleted = true
         isGenerating.value = false
-        closeActiveEventSource()
         messages.value[aiMessageIndex].loading = false
         if (!messages.value[aiMessageIndex].content) {
           messages.value[aiMessageIndex].content =
             'Connection interrupted before any content was received. Please retry.'
         }
         message.warning('Connection interrupted. Partial content has been kept.')
-        return
       }
-      handleError(new Error('SSE connection error'), aiMessageIndex)
     }
+
+    connect()
   } catch (error) {
     console.error('Create EventSource failed:', error)
     handleError(error, aiMessageIndex)

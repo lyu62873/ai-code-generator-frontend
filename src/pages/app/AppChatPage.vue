@@ -77,7 +77,11 @@
                 <a-avatar :src="aiAvatar" />
               </div>
               <div class="message-content">
-                <MarkdownRenderer v-if="message.content" :content="message.content" />
+                <MarkdownRenderer
+                  v-if="message.content"
+                  :content="message.content"
+                  :streaming="Boolean(isGenerating && message.loading)"
+                />
                 <div v-if="message.loading" class="loading-indicator">
                   <a-spin size="small" />
                   <span>AI is thinking...</span>
@@ -627,9 +631,43 @@ const sendMessage = async () => {
 
 const generateCode = async (userMessage: string, aiMessageIndex: number) => {
   let streamCompleted = false
+  let pendingAppend = ''
+  let flushTimer: ReturnType<typeof setTimeout> | null = null
 
   try {
     let fullContent = messages.value[aiMessageIndex].content || ''
+    const flushContent = () => {
+      if (!pendingAppend) {
+        return
+      }
+      fullContent += pendingAppend
+      pendingAppend = ''
+      reconnectAttempts.value = 0
+      stopRecoveryPolling()
+      messages.value[aiMessageIndex].content = fullContent
+      messages.value[aiMessageIndex].loading = false
+      saveRecoveryState(fullContent)
+      scrollToBottom()
+    }
+
+    const scheduleFlush = () => {
+      if (flushTimer) {
+        return
+      }
+      flushTimer = setTimeout(() => {
+        flushContent()
+        flushTimer = null
+      }, 100)
+    }
+
+    const flushAndClearTimer = () => {
+      if (flushTimer) {
+        clearTimeout(flushTimer)
+        flushTimer = null
+      }
+      flushContent()
+    }
+
     const connect = () => {
       if (streamCompleted) return
       closeActiveEventSource()
@@ -678,13 +716,8 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
             } else {
               lastChunkSeq.value += 1
             }
-            fullContent += content
-            reconnectAttempts.value = 0
-            stopRecoveryPolling()
-            messages.value[aiMessageIndex].content = fullContent
-            messages.value[aiMessageIndex].loading = false
-            saveRecoveryState(fullContent)
-            scrollToBottom()
+            pendingAppend += content
+            scheduleFlush()
           }
         } catch (error) {
           console.error('Parse message failed:', error)
@@ -695,6 +728,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
       eventSource.addEventListener('done', function () {
         if (streamCompleted) return
 
+        flushAndClearTimer()
         streamCompleted = true
         isGenerating.value = false
         closeActiveEventSource()
@@ -715,6 +749,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
         if (streamCompleted) return
 
         try {
+          flushAndClearTimer()
           const errorData = JSON.parse(event.data)
           console.error('SSE business error:', errorData)
 
@@ -740,6 +775,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
 
       eventSource.onerror = function () {
         if (streamCompleted || !isGenerating.value) return
+        flushAndClearTimer()
         closeActiveEventSource()
         reconnectAttempts.value += 1
         if (reconnectAttempts.value <= MAX_RECONNECT_ATTEMPTS) {
@@ -765,6 +801,10 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
 
     connect()
   } catch (error) {
+    if (flushTimer) {
+      clearTimeout(flushTimer)
+      flushTimer = null
+    }
     console.error('Create EventSource failed:', error)
     handleError(error, aiMessageIndex)
   }

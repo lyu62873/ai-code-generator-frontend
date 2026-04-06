@@ -12,6 +12,7 @@ import 'highlight.js/styles/github.css'
 interface Props {
   content: string
   streaming?: boolean
+  plainText?: boolean
 }
 
 const props = defineProps<Props>()
@@ -38,7 +39,7 @@ const md: MarkdownIt = new MarkdownIt({
 })
 
 const renderedMarkdown = computed(() => {
-  if (props.streaming) {
+  if (props.streaming || props.plainText) {
     const escaped = md.utils.escapeHtml(props.content || '')
     return `<pre class="hljs"><code>${escaped}</code></pre>`
   }

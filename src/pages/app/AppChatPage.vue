@@ -79,8 +79,15 @@
               <div class="message-content">
                 <MarkdownRenderer
                   v-if="message.content"
-                  :content="message.content"
+                  :content="getRenderedMessageContent(message)"
                   :streaming="Boolean(isGenerating && message.loading)"
+                  :plain-text="
+                    Boolean(
+                      appInfo?.codeGenType === CodeGenTypeEnum.MULTI_FILE &&
+                        isGenerating &&
+                        message.loading,
+                    )
+                  "
                 />
                 <div v-if="message.loading" class="loading-indicator">
                   <a-spin size="small" />
@@ -326,6 +333,57 @@ interface StreamRecoveryState {
   message: string
   lastSeq: number
   aiContent: string
+}
+
+const MULTI_FILE_STAGE_SPLIT_REGEX = /(?=^\[(?:Stage \d\/3|Self-check|Stage Summary)[^\n]*$)/gm
+
+const isMultiFileGeneratingHeader = (header: string) => {
+  return /^\[Stage\s+[123]\/3]\s+Generating/i.test(header)
+}
+
+const inferStageLanguage = (header: string) => {
+  if (header.includes('1/3')) return 'html'
+  if (header.includes('2/3')) return 'css'
+  if (header.includes('3/3')) return 'javascript'
+  return 'text'
+}
+
+const formatMultiFileContentForDisplay = (raw: string) => {
+  if (!raw) return ''
+  const normalized = raw.replace(/\r\n/g, '\n')
+  const sections = normalized.split(MULTI_FILE_STAGE_SPLIT_REGEX).filter(Boolean)
+  if (sections.length === 0) return normalized
+
+  const formattedSections = sections.map((section) => {
+    const lines = section.split('\n')
+    const header = (lines[0] || '').trim()
+    const body = lines.slice(1).join('\n').trim()
+    if (!isMultiFileGeneratingHeader(header)) {
+      return section.trim()
+    }
+    if (!body) {
+      return header
+    }
+    if (body.includes('```')) {
+      return `${header}\n\n${body}`
+    }
+    const language = inferStageLanguage(header)
+    return `${header}\n\n\`\`\`${language}\n${body}\n\`\`\``
+  })
+
+  return formattedSections.join('\n\n').trim()
+}
+
+const getRenderedMessageContent = (msg: Message) => {
+  const raw = msg.content || ''
+  const isMultiFile = appInfo.value?.codeGenType === CodeGenTypeEnum.MULTI_FILE
+  if (!isMultiFile) {
+    return raw
+  }
+  if (isGenerating.value && msg.loading) {
+    return raw
+  }
+  return formatMultiFileContentForDisplay(raw)
 }
 
 const closeActiveEventSource = () => {
@@ -636,18 +694,26 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
 
   try {
     let fullContent = messages.value[aiMessageIndex].content || ''
+    const shouldAutoScroll = () => {
+      const el = messagesContainer.value
+      if (!el) return false
+      const distanceToBottom = el.scrollHeight - (el.scrollTop + el.clientHeight)
+      return distanceToBottom < 120
+    }
     const flushContent = () => {
       if (!pendingAppend) {
         return
       }
+      const autoScroll = shouldAutoScroll()
       fullContent += pendingAppend
       pendingAppend = ''
       reconnectAttempts.value = 0
       stopRecoveryPolling()
       messages.value[aiMessageIndex].content = fullContent
-      messages.value[aiMessageIndex].loading = false
       saveRecoveryState(fullContent)
-      scrollToBottom()
+      if (autoScroll) {
+        scrollToBottom()
+      }
     }
 
     const scheduleFlush = () => {
@@ -731,6 +797,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
         flushAndClearTimer()
         streamCompleted = true
         isGenerating.value = false
+        messages.value[aiMessageIndex].loading = false
         closeActiveEventSource()
         stopRecoveryPolling()
         currentSessionId.value = undefined

@@ -185,6 +185,9 @@
         <div class="preview-header">
           <h3>Preview</h3>
           <div class="preview-actions">
+            <span class="preview-disclaimer">
+              Preview may differ from the final result. Please deploy to verify the actual page.
+            </span>
             <a-button
                 v-if="isOwner && previewUrl"
                 type="link"
@@ -1373,7 +1376,15 @@ onUnmounted(() => {
 
 .preview-actions {
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+.preview-disclaimer {
+  font-size: 12px;
+  color: #8c8c8c;
+  margin-right: 8px;
 }
 
 .preview-content {

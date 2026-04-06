@@ -93,6 +93,16 @@
                   <a-spin size="small" />
                   <span>AI is thinking...</span>
                 </div>
+                <div v-if="message.loading" class="generation-status-panel">
+                  <div class="generation-status-hint">Generating, please wait 5-10 minutes.</div>
+                  <div class="generation-task-line">{{ generationTaskName }}</div>
+                  <div class="generation-progress-track">
+                    <div
+                      class="generation-progress-fill"
+                      :style="{ width: `${generationProgress}%` }"
+                    ></div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -326,6 +336,18 @@ let recoveryPollingTimer: ReturnType<typeof setInterval> | null = null
 let recoveryPollingAttempts = 0
 const MAX_RECOVERY_POLLING_ATTEMPTS = 20
 const activeUserMessage = ref('')
+const generationTaskName = ref('Preparing generation workflow...')
+const generationProgress = ref(0)
+let generationProgressTimer: ReturnType<typeof setTimeout> | null = null
+const generationTaskPool = [
+  'Analyzing requirements...',
+  'Designing page structure...',
+  'Composing HTML layout...',
+  'Applying CSS styles...',
+  'Building JavaScript interactions...',
+  'Running quality checks...',
+  'Optimizing output formatting...',
+]
 
 interface StreamRecoveryState {
   sessionId: string
@@ -391,6 +413,47 @@ const closeActiveEventSource = () => {
     activeEventSource.close()
     activeEventSource = null
   }
+}
+
+const pickRandomGenerationTask = () => {
+  const index = Math.floor(Math.random() * generationTaskPool.length)
+  return generationTaskPool[index]
+}
+
+const stopGenerationStatusFeedback = () => {
+  if (generationProgressTimer) {
+    clearTimeout(generationProgressTimer)
+    generationProgressTimer = null
+  }
+  generationProgress.value = 0
+}
+
+const scheduleGenerationProgressTick = () => {
+  generationProgressTimer = setTimeout(
+    () => {
+      if (!isGenerating.value) {
+        return
+      }
+      if (generationProgress.value >= 100) {
+        generationTaskName.value = pickRandomGenerationTask()
+        generationProgress.value = Math.floor(Math.random() * 10) + 4
+      } else {
+        const remaining = 100 - generationProgress.value
+        const baseStep = remaining > 60 ? 2.6 : remaining > 30 ? 1.8 : 1.0
+        const jitter = Math.random() * 1.2
+        generationProgress.value = Math.min(100, Number((generationProgress.value + baseStep + jitter).toFixed(1)))
+      }
+      scheduleGenerationProgressTick()
+    },
+    700 + Math.floor(Math.random() * 900),
+  )
+}
+
+const startGenerationStatusFeedback = () => {
+  stopGenerationStatusFeedback()
+  generationTaskName.value = pickRandomGenerationTask()
+  generationProgress.value = Math.floor(Math.random() * 8) + 3
+  scheduleGenerationProgressTick()
 }
 
 const stopRecoveryPolling = () => {
@@ -693,6 +756,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
   let flushTimer: ReturnType<typeof setTimeout> | null = null
 
   try {
+    startGenerationStatusFeedback()
     let fullContent = messages.value[aiMessageIndex].content || ''
     const shouldAutoScroll = () => {
       const el = messagesContainer.value
@@ -798,6 +862,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
         streamCompleted = true
         isGenerating.value = false
         messages.value[aiMessageIndex].loading = false
+        stopGenerationStatusFeedback()
         closeActiveEventSource()
         stopRecoveryPolling()
         currentSessionId.value = undefined
@@ -828,6 +893,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
           streamCompleted = true
           isGenerating.value = false
           closeActiveEventSource()
+          stopGenerationStatusFeedback()
           stopRecoveryPolling()
           currentSessionId.value = undefined
           lastChunkSeq.value = -1
@@ -855,6 +921,7 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
 
         streamCompleted = true
         isGenerating.value = false
+        stopGenerationStatusFeedback()
         messages.value[aiMessageIndex].loading = false
         if (!messages.value[aiMessageIndex].content) {
           messages.value[aiMessageIndex].content =
@@ -887,6 +954,7 @@ const handleError = (error: unknown, aiMessageIndex: number) => {
   startRecoveryPolling()
   message.error('Generation failed, please retry')
   isGenerating.value = false
+  stopGenerationStatusFeedback()
   closeActiveEventSource()
 }
 
@@ -1088,6 +1156,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopRecoveryPolling()
+  stopGenerationStatusFeedback()
   closeActiveEventSource()
 })
 </script>
@@ -1216,6 +1285,41 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   color: #666;
+}
+
+.generation-status-panel {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid #e6e6e6;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.generation-status-hint {
+  font-size: 12px;
+  color: #666;
+  margin-bottom: 6px;
+}
+
+.generation-task-line {
+  font-size: 13px;
+  color: #333;
+  margin-bottom: 8px;
+}
+
+.generation-progress-track {
+  height: 8px;
+  width: 100%;
+  border-radius: 999px;
+  background: #e8e8e8;
+  overflow: hidden;
+}
+
+.generation-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #1677ff 0%, #52c41a 100%);
+  transition: width 0.6s ease;
 }
 
 .load-more-container {

@@ -73,6 +73,7 @@ npm run dev
 
 Vite dev server proxies `/api` to `http://localhost:8123` (see `vite.config.ts`).
 
+
 ### Environment variables
 
 Optional overrides (project root), prefix `VITE_`:
